@@ -1,0 +1,123 @@
+services:
+  # Base de Datos PostgreSQL con extensión pgvector
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: isc-ats-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: isc_ats
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d isc_ats"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Servidor de Objetos MinIO (Almacenamiento de CVs y Documentos)
+  minio:
+    image: pgsty/minio:latest
+    container_name: isc-ats-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"   # MinIO S3 API
+      - "9001:9001"   # Consola Web MinIO
+    volumes:
+      - minio_data:/data
+
+  # Broker de Tareas y Almacén de Denylist (Redis)
+  redis:
+    image: redis:alpine
+    container_name: isc-ats-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # API Backend (FastAPI con Hot-Reload para desarrollo)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: isc-ats-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - backend_venv:/app/.venv
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/isc_ats
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=candidates-cvs
+      - MINIO_SECURE=false
+      - REDIS_URL=redis://redis:6379/0
+      - QUEUE_BACKEND=arq
+      - CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+      # Variables adicionales cargadas desde .env si existe
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
+  # Worker de Tareas en Segundo Plano (Arq)
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: isc-ats-worker
+    restart: unless-stopped
+    command: ["arq", "app.worker.WorkerSettings"]
+    volumes:
+      - .:/app
+      - backend_venv:/app/.venv
+    environment:
+      - ENVIRONMENT=development
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/isc_ats
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin
+      - MINIO_BUCKET=candidates-cvs
+      - MINIO_SECURE=false
+      - REDIS_URL=redis://redis:6379/0
+      - QUEUE_BACKEND=arq
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  minio_data:
+  redis_data:
+  backend_venv:
