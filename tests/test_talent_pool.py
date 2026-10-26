@@ -200,3 +200,76 @@ async def test_list_filtered_by_candidate(session: AsyncSession) -> None:
     items, total = await svc.list(PageParams(page=1, size=20), candidate_id=c1.id)
     assert total == 1
     assert items[0].candidate_id == c1.id
+
+
+async def test_list_filtered_by_skill_and_tool(session: AsyncSession) -> None:
+    portal = await ParameterRepository(session).get_by_type_and_code("user_portal", "staff")
+    assert portal is not None
+    user1 = await BaseRepository(session, User).add(
+        User(email=f"{uuid.uuid4().hex[:12]}@test.local", portal_id=portal.id)
+    )
+    c1 = await BaseRepository(session, Candidate).add(
+        Candidate(
+            user_id=user1.id,
+            first_name="Carlos",
+            last_name="Dev",
+            parsed_data={
+                "skills": ["UniqueSkillDev", "PythonDevSpecial"],
+                "tools": ["UniqueToolDocker", "GitSpecial"],
+            },
+        )
+    )
+
+    user2 = await BaseRepository(session, User).add(
+        User(email=f"{uuid.uuid4().hex[:12]}@test.local", portal_id=portal.id)
+    )
+    c2 = await BaseRepository(session, Candidate).add(
+        Candidate(
+            user_id=user2.id,
+            first_name="Diana",
+            last_name="QA",
+            parsed_data={
+                "skills": ["UniqueSkillQA", "CypressSpecial"],
+                "tools": ["UniqueToolJira", "PostmanSpecial"],
+            },
+        )
+    )
+
+    svc = _service(session)
+    await svc.create(TalentPoolCreate(candidate_id=c1.id), ACTOR)
+    await svc.create(TalentPoolCreate(candidate_id=c2.id), ACTOR)
+
+    from app.shared.pagination import PageParams
+
+    # Filter by skill
+    items, total = await svc.list(PageParams(page=1, size=20), skill="UniqueSkillDev")
+    assert total == 1
+    assert items[0].candidate_id == c1.id
+    assert "UniqueSkillDev" in items[0].skills
+    assert "UniqueToolDocker" in items[0].tools
+
+    # Filter by tool
+    items, total = await svc.list(PageParams(page=1, size=20), tool="UniqueToolJira")
+    assert total == 1
+    assert items[0].candidate_id == c2.id
+
+    # Filter by both skill and tool matching c1
+    items, total = await svc.list(PageParams(page=1, size=20), skill="UniqueSkillDev", tool="UniqueToolDocker")
+    assert total == 1
+    assert items[0].candidate_id == c1.id
+
+    # Filter by skill and non-matching tool
+    items, total = await svc.list(PageParams(page=1, size=20), skill="UniqueSkillDev", tool="UniqueToolJira")
+    assert total == 0
+
+
+async def test_get_enriched(session: AsyncSession) -> None:
+    c = await _make_candidate(session)
+    svc = _service(session)
+    created = await svc.create(TalentPoolCreate(candidate_id=c.id), ACTOR)
+
+    enriched = await svc.get_enriched(created.id)
+    assert enriched.id == created.id
+    assert enriched.candidate_id == c.id
+    assert enriched.first_name == "Ana"
+    assert enriched.last_name == "Diaz"
